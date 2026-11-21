@@ -348,7 +348,7 @@ var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIR
     F.next.set(id, end);
     if (!seq) return;
     const last = Math.floor((f.size - 1) / BLOCK), b = Math.floor(end / BLOCK);
-    if (b <= last) blocks(id, b, Math.min(last, b + 7));
+    for (let k = 0; k < 8; k++) { const s = b + k * 8; if (s <= last) blocks(id, s, Math.min(last, s + 7)); }
   };
   // boot plan: the blocks the game read up to its first few hundred frames, in order, kept from the last session.
   // The next boot fetches them a window ahead of the game (starting while the wasm is still compiling).
