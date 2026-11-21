@@ -6220,10 +6220,18 @@ var _uew_js_frame_request = function(seq) {
         dumped = false;
         return;
       }
-      if (!dumped && n > 600 && now - since > 8e3 && Module._uew_threads) {
+      // no frame for a while: say whether the page's event loop is still running.  If this line never appears, the
+      // main thread is stuck inside wasm and no JS timer can run; if it does, the guest is idle-blocked instead.
+      if (!dumped && n > 0 && now - since > 8e3) {
         dumped = true;
-        console.log("[watchdog] no frame for 8 s; threads:");
-        Module._uew_threads();
+        console.log(`[watchdog] page alive, no frame for ${((now - since) / 1e3).toFixed(0)} s: presents ${n}, ` + `frame pending ${Module.uewFramePending || 0}, frame seq ${Module.uewFrameSeq || 0}`);
+        if (Module._uew_threads) {
+          try {
+            Module._uew_threads();
+          } catch (e) {
+            console.log("[watchdog] thread dump failed: " + e);
+          }
+        }
       }
     }, 1e3);
   }
@@ -7559,8 +7567,13 @@ async function _uewg_init(canvasW, canvasH, ringPtr, ringSize) {
     if (used > g.ringDone) g.queue.writeBuffer(g.ring, g.ringDone, HEAPU8, g.ringPtr + g.ringDone, used - g.ringDone);
     g.ringDone = used;
     if (g.enc) {
-      g.queue.submit([ g.enc.finish() ]);
+      const e = g.enc, mk = Module.uewMk, mkT = mk ? performance.now() : 0;
       g.enc = null;
+      g.queue.submit([ e.finish() ]);
+      if (mk) {
+        mk.t.sub += performance.now() - mkT;
+        mk.n.sub++;
+      }
     }
     g.passesInCb = 0;
     g.queuedBytes = 0;
@@ -7632,6 +7645,22 @@ async function _uewg_init(canvasW, canvasH, ringPtr, ringSize) {
     req: 0,
     fms: 0,
     logged: 0
+  };
+  Module.uewMk = {
+    t: {
+      tex: 0,
+      twr: 0,
+      sh: 0,
+      pipe: 0,
+      sub: 0
+    },
+    n: {
+      tex: 0,
+      twr: 0,
+      sh: 0,
+      pipe: 0,
+      sub: 0
+    }
   };
   // debug: window.uewCaptureFrame = N reads back every render target of frame N into Module.uewgCaptured
   g.capFrame = (typeof window != "undefined" && window.uewCaptureFrame) | 0;
@@ -8297,6 +8326,14 @@ function _uewg_present(view, ringUsed) {
       draws: 0,
       by: (Module.uewgStats || (typeof window != "undefined" && window.uewStats)) ? new Map : null
     };
+    const M = Module.uewMk;
+    if (M) {
+      if (g.frames <= 3) console.log(`[boot] frame ${g.frames} main split: texture create ${M.t.tex.toFixed(0)} ms (${M.n.tex}), ` + `upload ${M.t.twr.toFixed(0)} ms (${M.n.twr}), shader modules ${M.t.sh.toFixed(0)} ms (${M.n.sh}), ` + `pipelines ${M.t.pipe.toFixed(0)} ms (${M.n.pipe}), submit ${M.t.sub.toFixed(0)} ms (${M.n.sub})`);
+      for (const k in M.t) {
+        M.t[k] = 0;
+        M.n[k] = 0;
+      }
+    }
   }
 }
 
@@ -8492,7 +8529,13 @@ function _uewg_render_pipeline_create(jsonPtr) {
     return id;
   }
   try {
-    return g.add(done(g.device.createRenderPipeline(desc)));
+    const mk = Module.uewMk, mkT = mk ? performance.now() : 0;
+    const p = g.device.createRenderPipeline(desc);
+    if (mk) {
+      mk.t.pipe += performance.now() - mkT;
+      mk.n.pipe++;
+    }
+    return g.add(done(p));
   } catch (e) {
     if (g.errors++ < 40) console.log("[webgpu] pipeline " + e.message);
     return 0;
@@ -8531,9 +8574,14 @@ function _uewg_shader_create(srcPtr) {
   if (window.uewShaderPatch) code = window.uewShaderPatch(code) || code;
   g.hitch.sh++;
   if (window.uewLogCreates) console.log(`[create] shader ${code.length} chars`);
+  const mk = Module.uewMk, mkT = mk ? performance.now() : 0;
   const m = g.device.createShaderModule({
     code
   });
+  if (mk) {
+    mk.t.sh += performance.now() - mkT;
+    mk.n.sh++;
+  }
   if (Module.uewgDebug) console.log("[webgpu] shader " + code);
   m.getCompilationInfo().then(info => {
     for (const x of info.messages) if (x.type === "error" && g.errors++ < 40) console.log(`[webgpu] shader ${x.lineNum}:${x.linePos} ${x.message}`);
@@ -8581,6 +8629,8 @@ function _uewg_texture_create(jsonPtr) {
   if (d.rt) usage |= GPUTextureUsage.RENDER_ATTACHMENT;
   if (d.uav) usage |= GPUTextureUsage.STORAGE_BINDING;
   try {
+    const mk = Module.uewMk, mkT = mk ? performance.now() : 0;
+    // where the boot frame's seconds go
     const t = g.device.createTexture({
       size: [ d.w, d.h, d.d ],
       mipLevelCount: d.mips,
@@ -8589,6 +8639,10 @@ function _uewg_texture_create(jsonPtr) {
       usage,
       viewFormats: d.viewFormats || []
     });
+    if (mk) {
+      mk.t.tex += performance.now() - mkT;
+      mk.n.tex++;
+    }
     g.hitch.tex++;
     g.hitch.texPx += d.w * d.h * d.d;
     const id = g.add(t);
@@ -8611,6 +8665,7 @@ function _uewg_texture_write(id, mip, x, y, z, w, h, d, ptr, bpr, rows, size) {
   }
   g.stat.texWrite++;
   g.hitch.upBytes += bpr * rows * d;
+  const mk = Module.uewMk, mkT = mk ? performance.now() : 0;
   try {
     g.queue.writeTexture({
       texture: t,
@@ -8624,6 +8679,10 @@ function _uewg_texture_write(id, mip, x, y, z, w, h, d, ptr, bpr, rows, size) {
     g.queued(bpr * rows * d);
   } catch (e) {
     if (g.errors++ < 40) console.log("[webgpu] upload " + e.message);
+  }
+  if (mk) {
+    mk.t.twr += performance.now() - mkT;
+    mk.n.twr++;
   }
 }
 
