@@ -10,24 +10,20 @@
   canvas { position: absolute; inset: 0; margin: auto; max-width: 100%; max-height: 100%; aspect-ratio: 1280 / 720;
            width: 100%; height: auto; outline: none; }
   @media (min-aspect-ratio: 1280 / 720) { canvas { width: auto; height: 100%; } }
-  /* loading screen, centred over the canvas until the game draws its first frame */
-  #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-          background: #000; z-index: 5; transition: opacity .4s ease; font: 14px system-ui, sans-serif; color: #b8b8b8; pointer-events: none; }
-  #boot.done { opacity: 0; }
-  #boot .bar { width: min(420px, calc(100vw - 64px)); height: 8px; border-radius: 4px; background: #1c1c1c; overflow: hidden;
-               box-shadow: inset 0 0 0 1px #2a2a2a; }
-  #boot .bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #6f8f3f, #a9c25a); border-radius: 4px;
-                 transition: width .25s linear; }
-  #boot .pct { font: 600 28px system-ui, sans-serif; color: #e6e6e6; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
-  #status { min-height: 1.3em; text-align: center; padding: 0 16px; font-variant-numeric: tabular-nums; }
+  /* loading screen: plain, just placed over the game until its first frame */
+  #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+          background: #000; color: #fff; z-index: 5; }
   #fps { position: fixed; left: 8px; top: 6px; font: 600 13px ui-monospace, Consolas, monospace; color: #e8e8e8; background: #000a;
          padding: 2px 6px; border-radius: 4px; pointer-events: none; display: none; }
 </style>
 </head>
 <body>
 <script>
-  // GAME FILES HOST: empty means the game files sit next to this page
-  window.uewDataHost = "";
+  // GAME FILES HOST: where the game's files (the game.wasm.* code parts and the data/ folder) are served from.
+  // Empty means "next to this page", which is all a normal web server or static host needs: no headers, no CORS,
+  // no Range support. Opened straight from disk (file://) a page may not read local files at all, so that case
+  // falls back to the game's local server; put its address here if it runs somewhere else.
+  window.uewDataHost = location.protocol === "file:" ? "http://localhost:8100/" : "";
 </script>
 <canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
 <script>
@@ -38,18 +34,44 @@
     const c = document.getElementById("canvas");
     const qs = new URLSearchParams(location.search);
     const want = qs.get("res") || "";
-    // a weak device renders fewer pixels and asks the engine for cheaper scalability settings: the page cannot see
-    // the WebGPU adapter yet, but the browser's own WebGL renderer string, core count and memory tell enough
-    const qq = qs.get("quality") || "";
-    const weak = qq === "low" ? true : qq === "high" ? false : (() => {
+    // device profile, read before anything loads: "low" (Chromebooks, phone/tablet GPUs, software rendering, small
+    // machines), "mid" (integrated graphics, 4 cores or 4 GB) or "high". It sets the render size, the engine's
+    // scalability settings and how much memory the game, its file cache and its video memory may take.
+    // ?quality=low|medium|high overrides it.
+    const qq = (qs.get("quality") || "").toLowerCase();
+    let gpuName = "";
+    const tier = qq === "low" ? 0 : (qq === "medium" || qq === "mid") ? 1 : qq === "high" ? 2 : (() => {
       try {
         const g = document.createElement("canvas").getContext("webgl") || document.createElement("canvas").getContext("experimental-webgl");
         const d = g && g.getExtension("WEBGL_debug_renderer_info");
-        const n = (d ? g.getParameter(d.UNMASKED_RENDERER_WEBGL) : g ? g.getParameter(g.RENDERER) : "") || "";
-        const cores = navigator.hardwareConcurrency || 8, mem = navigator.deviceMemory || 8;
-        return /intel|hd graphics|uhd graphics|mali|adreno|powervr|swiftshader|software|basic render|llvmpipe/i.test(n) || cores <= 4 || mem <= 4;
-      } catch (e) { return false; }
+        gpuName = (d ? g.getParameter(d.UNMASKED_RENDERER_WEBGL) : g ? g.getParameter(g.RENDERER) : "") || "";
+        const lose = g && g.getExtension("WEBGL_lose_context");
+        if (lose) lose.loseContext();          // done with it: don't keep a second GPU context alive
+      } catch (e) {}
+      const cores = navigator.hardwareConcurrency || 8, mem = navigator.deviceMemory || 8;
+      const ua = navigator.userAgent + " " + ((navigator.userAgentData && navigator.userAgentData.platform) || "");
+      if (/CrOS|Chrome OS|ChromeOS|Android/i.test(ua)) return 0;
+      if (/mali|adreno|powervr|videocore|tegra|imagination|swiftshader|llvmpipe|software|basic render|microsoft basic/i.test(gpuName)) return 0;
+      if (mem <= 2 || (mem <= 4 && cores <= 4)) return 0;
+      if (/intel|hd graphics|uhd graphics|iris|radeon\(tm\) graphics|radeon graphics|vega \d+ graphics/i.test(gpuName) || cores <= 4 || mem <= 4) return 1;
+      return 2;
     })();
+    const P = window.uewProfile = [
+      // (no forced texture pool size: one too small for the scene keeps the streamer loading and dropping mips, which
+      // tripled the engine's start-up work)
+      { name: "low", w: 848, h: 480, guestMB: 1536, gpuMB: 768, cacheMB: 128, playCacheMB: 48,
+        cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 1,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
+              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0,t.MaxFPS 30" },
+      { name: "mid", w: 960, h: 540, guestMB: 1536, gpuMB: 1024, cacheMB: 192, playCacheMB: 96,
+        cmds: "sg.ViewDistanceQuality 1,sg.ShadowQuality 1,sg.PostProcessQuality 1,sg.TextureQuality 1,sg.EffectsQuality 1," +
+              "sg.AntiAliasingQuality 1,r.Shadow.MaxResolution 1024" },
+      { name: "high", w: 0, h: 0, guestMB: 2048, gpuMB: 1536, cacheMB: 512, playCacheMB: 128, cmds: "" },
+    ][tier];
+    // testing overrides: ?guestmb=N (guest memory), ?cmds=0 (none of the profile's engine settings)
+    if (+qs.get("guestmb")) P.guestMB = +qs.get("guestmb");
+    if (qs.get("cmds") === "0") P.cmds = "";
+    console.log(`[profile] ${P.name} (${gpuName || "gpu unknown"}, ${navigator.hardwareConcurrency || "?"} cores, ${navigator.deviceMemory || "?"} GB)${qq ? " by ?quality" : ""}`);
+    const weak = tier < 2;
     let w = 0, h = 0;
     if (want === "native") {
       const d = Math.min(window.devicePixelRatio || 1, 3);
@@ -64,7 +86,7 @@
     // no size asked for: the game has to render exactly the canvas, or its own resolution (an engine that reads its
     // settings file draws 1680x1050 into a 1280x720 canvas) leaves the picture letterboxed and the crosshair off
     // centre. A weak device starts at 960x540: games refuse anything smaller ("The current resolution is too low").
-    if (!w || !h) { w = weak ? Math.min(c.width, 960) : c.width; h = weak ? Math.min(c.height, 540) : c.height; }
+    if (!w || !h) { w = P.w ? Math.min(c.width, P.w) : c.width; h = P.h ? Math.min(c.height, P.h) : c.height; }
     if (w >= 320 && h >= 200) {
       // multiples of 8: Unreal Engine 3 rounds its depth buffer up to 8 pixels, and D3D11 draws to a smaller back
       // buffer with it while WebGPU wants attachments of one size (at 1600x900 every frame failed: depth 1600x904)
@@ -72,24 +94,21 @@
       c.width = w; c.height = h; c.style.aspectRatio = `${w} / ${h}`;
       // the page's canvas is the game window's client area, so the engine renders 1:1 to it
       window.uewResArgs = [`-ResX=${w}`, `-ResY=${h}`];
-      if (weak) window.uewResArgs.push("-ExecCmds=sg.ViewDistanceQuality 1,sg.ShadowQuality 0,sg.PostProcessQuality 1," +
-        "sg.TextureQuality 1,sg.EffectsQuality 1,sg.AntiAliasingQuality 1,r.ScreenPercentage 70");
+      if (P.cmds) window.uewResArgs.push("-ExecCmds=" + P.cmds);
     }
   })();
 </script>
-<div id="boot"><div class="pct" id="bootpct">0%</div><div class="bar"><i id="bootbar"></i></div><div id="status">Loading…</div></div>
+<div id="boot"><progress id="bootbar" max="100" value="0"></progress><div><span id="bootpct">0%</span> <span id="status">Loading…</span></div></div>
 <script>
   // the loading bar: the code download is the first part (when the code isn't on this device yet), then the game's
-  // reads against the boot plan (what it reads before its first frame); it fades out once the first frame is drawn
+  // reads against the boot plan (what it reads before its first frame); it goes away once the first frame is drawn
   (() => {
     const box = document.getElementById("boot"), bar = document.getElementById("bootbar"), pct = document.getElementById("bootpct");
     let shown = 0;
     const tick = () => {
       const M = window.Module || {}, F = M.uewFiles;
       if ((M.uewPresents | 0) > 0) {
-        bar.style.width = "100%"; pct.textContent = "100%";
-        box.classList.add("done");
-        setTimeout(() => box.remove(), 500);
+        box.remove();
         return;
       }
       const code = window.uewCodeProgress == null ? 0 : window.uewCodeProgress;
@@ -97,7 +116,7 @@
       const cw = window.uewCodeCached ? 0.03 : 0.3;          // the code's share of the bar
       const p = Math.min(0.99, cw * code + (1 - cw) * data);
       shown = Math.max(shown, p);                              // never goes backwards
-      bar.style.width = (shown * 100).toFixed(1) + "%";
+      bar.value = shown * 100;
       pct.textContent = Math.floor(shown * 100) + "%";
       if (code >= 1 && data > 0 && (M.uewPresents | 0) === 0) document.getElementById("status").textContent = data >= 0.99 ? "Starting the game…" : "Loading the game…";
       requestAnimationFrame(tick);
@@ -110,14 +129,16 @@
   // frame counter: Ctrl+Shift+F toggles it (remembered), ?fps=1 or ?fps=0 in the address overrides
   (() => {
     const el = document.getElementById("fps");
-    let on = true;
+    let on = false;
     try { const v = localStorage.getItem("uewFps"); if (v !== null) on = v === "1"; } catch (e) {}
     const q = new URLSearchParams(location.search).get("fps");
     if (q !== null) on = q !== "0";
     const show = () => { el.style.display = on ? "block" : "none"; };
     show();
     addEventListener("keydown", e => {
-      if (e.ctrlKey && e.shiftKey && e.code === "KeyF") {
+      // F3 (or Ctrl+Shift+F) shows or hides it; the browser's own F3 (find next) is kept from firing
+      if ((e.code === "F3" && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) || (e.ctrlKey && e.shiftKey && e.code === "KeyF")) {
+        if (e.repeat) { e.preventDefault(); e.stopImmediatePropagation(); return; }
         on = !on; show();
         try { localStorage.setItem("uewFps", on ? "1" : "0"); } catch (err) {}
         e.preventDefault(); e.stopImmediatePropagation();
@@ -157,10 +178,13 @@
     uewAsyncShaders: true,
     uewDebugPanel: false,
     uewNetPlaceholders: false,
-    uewCacheMB: 682,
+    uewCacheMB: Math.min(682, (window.uewProfile || {}).cacheMB || 682),
     // video memory the game is told it has: on low-memory devices a smaller budget makes Unreal keep a smaller
     // texture pool instead of filling RAM the browser and the game need
-    uewGpuMB: (m => m <= 2 ? Math.min(3738, 512) : m <= 4 ? Math.min(3738, 1024) : 3738)(navigator.deviceMemory || 8),
+    uewGpuMB: Math.min(3738, (window.uewProfile || {}).gpuMB || 3738),
+    // guest memory is reserved whole at start: the profile's size, not the build's (the game peaks well below it)
+    uewGuestMB: (window.uewProfile || {}).guestMB || 0,
+    uewPlayCacheMB: (window.uewProfile || {}).playCacheMB || 0,
     print: t => console.log(t),
     printErr: t => console.log(t),
     setStatus: t => { if (t) status.textContent = t; },
@@ -172,7 +196,7 @@
     // The code is shipped gzipped (a fifth of the size, for slow hosts) and decompressed as it streams into the
     // compiler; the decompressed module is kept in Cache Storage, and later launches compile from there, where the
     // browser also keeps the compiled machine code. A rebuild has a new code id, so it never runs stale code.
-    const CODE_ID = "fcc222593dd0", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
+    const CODE_ID = "66182fcf87d8", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
     const codeResponse = async () => {
       const wasmType = { headers: { "Content-Type": "application/wasm" } };
       const prefix = "uew-code:" + location.pathname + ":", url = new URL("__uew_code/" + CODE_ID + "/game.wasm", location.href).href;
@@ -201,7 +225,7 @@
         }
       });
       const r = { body: joined };
-      const total = 44733610;
+      const total = 44733308;
       let got = 0;
       const count = new TransformStream({ transform(ch, ctl) {
         got += ch.length;
@@ -266,24 +290,10 @@
 </script>
 <script>
   // real threads: start once the page is cross-origin isolated (headers from the host, or coi-sw.js)
-  // game.js is fetched from the CDN and run from a blob: URL so it counts as same-origin: it starts its threads with
-  // new Worker(<its own script URL>), which browsers refuse for a script on another origin
-  if (self.crossOriginIsolated) {
-    fetch(GAME_BASE + "game.js")
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status} for ${GAME_BASE}game.js`); return r.text(); })
-      .then(code => {
-        const s = document.createElement("script");
-        s.src = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
-        document.body.appendChild(s);
-      })
-      .catch(e => { status.textContent = "Failed to load: " + e.message; });
-  } else if (navigator.serviceWorker && window.isSecureContext) {
+  if (self.crossOriginIsolated) document.write('<script src="game.js"><\/script>');
+  else if (navigator.serviceWorker && window.isSecureContext) {
     status.textContent = "Setting up threads…";
-    // a service worker must come from this page's own origin, so coi-sw.js is the one file that can't be on the CDN
-    navigator.serviceWorker.register("coi-sw.js").catch(e => {
-      status.textContent = "Threads need cross-origin isolation: serve this page with COOP/COEP headers, or put coi-sw.js next to it.";
-      throw e;
-    }).then(() => navigator.serviceWorker.ready).then(() => {
+    navigator.serviceWorker.register("coi-sw.js").then(() => navigator.serviceWorker.ready).then(() => {
       if (sessionStorage.getItem("uewCoi") === location.href) status.textContent = "This host blocks the isolation real threads need; rebuild with cooperative threads.";
       else { sessionStorage.setItem("uewCoi", location.href); location.reload(); }
     });

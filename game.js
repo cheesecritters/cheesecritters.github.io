@@ -157,8 +157,23 @@ if (ENVIRONMENT_IS_NODE) {
     if (F.seen.has(k)) F.refetched += buf.byteLength; else F.seen.add(k);
     F.cache.set(k, buf);
     F.cacheBytes += buf.byteLength;
-    while (F.cacheBytes > F.cacheMax) {
-      const [k0, v0] = F.cache.entries().next().value;
+    evict();
+  };
+  // blocks a waiting read still needs are pinned (F.start until its readCached): a read bigger than the memory cache
+  // (the 86 MB game image against a low-memory device's 64 MB) otherwise evicted its own first blocks as the last ones
+  // arrived and never completed
+  F.pins = new Map;
+  const pin = (id, b0, b1, d) => {
+    for (let b = b0; b <= b1; b++) {
+      const k = key(id, b), n = (F.pins.get(k) || 0) + d;
+      if (n > 0) F.pins.set(k, n); else F.pins.delete(k);
+    }
+  };
+  const evict = () => {
+    if (F.cacheBytes <= F.cacheMax) return;
+    for (const [k0, v0] of F.cache) {
+      if (F.cacheBytes <= F.cacheMax) break;
+      if (F.pins.has(k0)) continue;
       F.cache.delete(k0);
       F.cacheBytes -= v0.byteLength;
     }
@@ -622,6 +637,19 @@ if (ENVIRONMENT_IS_NODE) {
     }, 1e3);
     // once the game is drawing, the rest of its files trickle into the disk store in the background (one request at a
     // time, and only while the game isn't waiting on a read), so later areas and launches don't wait on the host
+    // the big memory cache is for running the boot plan ahead; once the game is drawing it only needs to hold what is
+    // being read now (the rest is on disk), so give the memory back
+    const play = (Module.uewPlayCacheMB | 0) << 20;
+    if (play && F.store && !/[?&]cachemb=/.test(location.search)) {
+      const t3 = setInterval(() => {
+        if ((Module.uewPresents | 0) < 60) return;
+        clearInterval(t3);
+        if (F.cacheMax <= play) return;
+        F.cacheMax = play;
+        evict();
+        console.log(`[files] memory cache trimmed to ${play >> 20} MB now that the game is running`);
+      }, 1e3);
+    }
     const nofill = /[?&]nofill=1/.test(location.search) || (navigator.connection && navigator.connection.saveData);
     if (!nofill) {
       const t2 = setInterval(() => {
@@ -649,6 +677,8 @@ if (ENVIRONMENT_IS_NODE) {
       if (!v) return -1;
       bufs.push(v);
     }
+    if (F.pins.size) pin(id, b0, b1, -1);
+    // the read this F.start began is done with them (no-op if none pinned)
     touch(id, b0, b1);
     ahead(id, off, len);
     return copy(bufs, b0, off, len, dst);
@@ -661,6 +691,7 @@ if (ENVIRONMENT_IS_NODE) {
     // only what the game waits on: pak reads hop around, and a blanket 7 MB read-ahead on every miss spent most of a slow
     // host's bandwidth on blocks never read. Sequential reads still get read-ahead (ahead() below), and the boot plan
     // covers the rest.
+    pin(id, b0, b1, 1);
     blocks(id, b0, b1, HI);
     touch(id, b0, b1);
     ahead(id, off, len);
