@@ -716,6 +716,19 @@ if (ENVIRONMENT_IS_NODE) {
     if (!T.planTotal) T.planTotal = T.plan.reduce((a, r) => a + (r[2] || 0), 0);
     return T.planTotal ? Math.min(1, T.order.length / T.planTotal) : 0;
   };
+  // bytes the boot plan has to come over the network (what is stored as it would be downloaded; zero blocks cost
+  // nothing), for the loading screen's time estimate on a first visit. 0 until the plan is known.
+  F.planBytes = () => {
+    if (T.planBytes || !T.plan.length) return T.planBytes || 0;
+    let n = 0;
+    for (const [id, b0, c] of T.plan) {
+      const f = F.files[id];
+      if (!f || f.stub) continue;
+      const L = layout(f);
+      for (let b = b0; b < b0 + c && b < L.length; b++) n += L[b].len;
+    }
+    return (T.planBytes = n);
+  };
   // debug: which files were downloaded most, and how often blocks came down again after leaving the cache
   F.report = () => {
     const paths = new Map;
@@ -8329,7 +8342,9 @@ async function _uewg_init(canvasW, canvasH, ringPtr, ringSize) {
   const want = [ "texture-compression-bc", "texture-compression-bc-sliced-3d", "float32-filterable", "float32-blendable", "rg11b10ufloat-renderable", "depth32float-stencil8", "depth-clip-control", "indirect-first-instance", "texture-formats-tier1", "texture-formats-tier2", "texture-component-swizzle", "bgra8unorm-storage", "dual-source-blending" ];
   // debug: ?gpuprof=1 (or window.uewGpuProfile = 1 before the game starts) times every pass on the GPU and logs the slowest ones
   if (typeof window !== "undefined" && (window.uewGpuProfile || (typeof location !== "undefined" && /[?&]gpuprof=1(&|$)/.test(location.search)))) want.push("timestamp-query");
-  const features = want.filter(f => adapter.features.has(f));
+  // testing: ?nofeat=a,b leaves those optional features off, to see what a GPU without them (Chromebooks, phones) gets
+  const nofeat = typeof location !== "undefined" ? (new URLSearchParams(location.search).get("nofeat") || "").split(",").filter(x => x) : [];
+  const features = want.filter(f => adapter.features.has(f) && !nofeat.includes(f));
   const L = adapter.limits, req = {};
   for (const k of [ "maxSampledTexturesPerShaderStage", "maxSamplersPerShaderStage", "maxStorageBuffersPerShaderStage", "maxStorageTexturesPerShaderStage", "maxUniformBuffersPerShaderStage", "maxBindingsPerBindGroup", "maxInterStageShaderVariables", "maxColorAttachmentBytesPerSample", "maxBufferSize", "maxStorageBufferBindingSize", "maxDynamicUniformBuffersPerPipelineLayout", "maxComputeWorkgroupStorageSize", "maxComputeInvocationsPerWorkgroup", "maxTextureArrayLayers", "maxTextureDimension2D", "maxVertexAttributes", "maxVertexBuffers", "maxComputeWorkgroupSizeX", "maxComputeWorkgroupSizeY", "maxComputeWorkgroupSizeZ", "maxComputeWorkgroupsPerDimension", "maxTextureDimension3D", "maxTextureDimension1D", "maxBindGroups" ]) if (k in L) req[k] = L[k];
   let device;
@@ -9154,8 +9169,9 @@ async function _uewg_init(canvasW, canvasH, ringPtr, ringSize) {
     g.queueLimit = 8 << 20;
     console.log("[webgpu] this may be the integrated GPU: Windows Settings > System > Display > Graphics, set your browser to High performance");
   }
-  // bit 1: 24-bit depth can be stored as 32-bit float (more precise, and readable by copies)
-  return 1 | (g.features.has("depth32float-stencil8") ? 2 : 0);
+  // bit 1: 24-bit depth can be stored as 32-bit float (more precise, and readable by copies). The optional features
+  // the texture code adapts to come back here too (bits 2-4), so game threads never have to ask the page later
+  return 1 | (g.features.has("depth32float-stencil8") ? 2 : 0) | (g.features.has("texture-compression-bc") ? 4 : 0) | (g.features.has("rg11b10ufloat-renderable") ? 8 : 0) | (g.features.has("float32-filterable") ? 16 : 0);
 }
 
 _uewg_init.isAsync = true;
@@ -10166,8 +10182,6 @@ function uewg_no_bc() {
   return (g && g.features && !g.features.has("texture-compression-bc")) ? 1 : 0;
 }
 
-uewg_no_bc.sig = "i";
-
 function __asyncjs__uew_js_switch(from, to, target) {
   return Asyncify.handleAsync(async () => {
     Module.uewRes = Module.uewRes || {};
@@ -10476,7 +10490,6 @@ function assignWasmImports() {
     /** @export */ uewg_layout_create: _uewg_layout_create,
     /** @export */ uewg_max_dynamic_ubo: _uewg_max_dynamic_ubo,
     /** @export */ uewg_max_storage: _uewg_max_storage,
-    /** @export */ uewg_no_bc,
     /** @export */ uewg_pipe_ready: _uewg_pipe_ready,
     /** @export */ uewg_present: _uewg_present,
     /** @export */ uewg_readback_done: _uewg_readback_done,

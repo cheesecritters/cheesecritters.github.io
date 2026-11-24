@@ -61,10 +61,14 @@
       // tripled the engine's start-up work)
       { name: "low", w: 848, h: 480, guestMB: 1536, gpuMB: 768, cacheMB: 128, playCacheMB: 48,
         cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 1,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
-              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0,t.MaxFPS 30" },
+              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0,t.MaxFPS 30," +
+              // weak GPUs (Chromebooks): the 3D scene at 70% of the canvas, scaled up (UI stays sharp), one shadow
+              // cascade, and the costly post effects off
+              "r.ScreenPercentage 70,r.Shadow.CSM.MaxCascades 1,r.AmbientOcclusionLevels 0,r.SSR.Quality 0,r.BloomQuality 0," +
+              "r.LightShaftQuality 0,r.DepthOfFieldQuality 0,r.MotionBlurQuality 0,r.LensFlareQuality 0,r.SceneColorFringeQuality 0" },
       { name: "mid", w: 960, h: 540, guestMB: 1536, gpuMB: 1024, cacheMB: 192, playCacheMB: 96,
         cmds: "sg.ViewDistanceQuality 1,sg.ShadowQuality 1,sg.PostProcessQuality 1,sg.TextureQuality 1,sg.EffectsQuality 1," +
-              "sg.AntiAliasingQuality 1,r.Shadow.MaxResolution 1024" },
+              "sg.AntiAliasingQuality 1,r.Shadow.MaxResolution 1024,r.ScreenPercentage 85" },
       { name: "high", w: 0, h: 0, guestMB: 2048, gpuMB: 1536, cacheMB: 512, playCacheMB: 128, cmds: "" },
     ][tier];
     // testing overrides: ?guestmb=N (guest memory), ?cmds=0 (none of the profile's engine settings)
@@ -100,28 +104,101 @@
 </script>
 <div id="boot"><progress id="bootbar" max="100" value="0"></progress><div><span id="bootpct">0%</span> <span id="status">Loading…</span></div></div>
 <script>
-  // the loading bar: the code download is the first part (when the code isn't on this device yet), then the game's
-  // reads against the boot plan (what it reads before its first frame); it goes away once the first frame is drawn
+  // The loading bar and the time left. A boot is mostly the engine starting up, and the game files it reads are only
+  // part of that: after its last big read it still works for seconds with nothing to measure. So every launch that
+  // didn't have to download anything keeps its own timeline here (seconds in, against how much of the boot plan the
+  // game had read), and the next one places itself on it: the bar moves with real time, never past where the reads
+  // say this boot is, and the time left is scaled by how fast this boot runs compared with the last. A first visit has
+  // no timeline: it goes by bytes downloaded and the download speed so far.
   (() => {
-    const box = document.getElementById("boot"), bar = document.getElementById("bootbar"), pct = document.getElementById("bootpct");
-    let shown = 0;
+    const box = document.getElementById("boot"), bar = document.getElementById("bootbar");
+    const pct = document.getElementById("bootpct"), stat = document.getElementById("status");
+    const KEY = "uewBootTime:" + location.pathname;
+    let H = null;
+    try { H = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) {}
+    if (!H || !(H.T > 0) || !Array.isArray(H.s)) H = null;
+    const t0 = performance.now(), samples = [];
+    let tSat = 0, lastSample = -1, shown = 0, te = 0, lastT = 0;
+    const secs = s => s >= 90 ? `about ${Math.round(s / 60)} min left` : s >= 1.5 ? `about ${Math.round(s)} s left` : "almost done";
+    // timeline time at which the last boot had read fraction f (and the next time it read more than that)
+    const at = f => {
+      const S = H.s;
+      for (let i = 0; i < S.length; i++) if (S[i][1] >= f) {
+        const a = S[i - 1] || [0, 0], b = S[i];
+        const k = b[1] > a[1] ? (f - a[1]) / (b[1] - a[1]) : 1;
+        let next = H.sat;
+        for (let j = i; j < S.length; j++) if (S[j][1] > f + 1e-4) { next = S[j][0]; break; }
+        return [a[0] + (b[0] - a[0]) * k, next];
+      }
+      return [H.sat, H.T];
+    };
     const tick = () => {
-      const M = window.Module || {}, F = M.uewFiles;
+      const M = window.Module || {}, F = M.uewFiles, t = (performance.now() - t0) / 1000, dt = t - lastT;
+      lastT = t;
+      const f = F && F.progress ? F.progress() : 0;
+      const cached = !!window.uewCodeCached;
       if ((M.uewPresents | 0) > 0) {
+        // keep this timeline for the next launch: only a boot that downloaded (next to) nothing is a fair measure
+        if (cached && F && F.fetched < (8 << 20) && samples.length > 4)
+          try { localStorage.setItem(KEY, JSON.stringify({ T: +t.toFixed(2), sat: +(tSat || t).toFixed(2), s: samples })); } catch (e) {}
         box.remove();
+        clearInterval(iv);
         return;
       }
-      const code = window.uewCodeProgress == null ? 0 : window.uewCodeProgress;
-      const data = F && F.progress ? F.progress() : 0;
-      const cw = window.uewCodeCached ? 0.03 : 0.3;          // the code's share of the bar
-      const p = Math.min(0.99, cw * code + (1 - cw) * data);
-      shown = Math.max(shown, p);                              // never goes backwards
+      if (f >= 0.999 && !tSat) tSat = t;
+      if (t - lastSample >= 0.25 && samples.length < 2400) { lastSample = t; samples.push([+t.toFixed(2), +f.toFixed(4)]); }
+      let p, left, what;
+      if (H && cached) {
+        // on the last boot's timeline: real time moves it, the reads cap it. Reading the files can go at another pace
+        // than last time (disk instead of network); the engine's start-up work after the last read is CPU work, so
+        // that stage is expected to take as long as it did last time.
+        const postLast = Math.max(1, H.T - H.sat);
+        if (!tSat) {
+          const [tf, cap] = at(f);
+          te = Math.min(Math.max(te + dt, tf), cap);
+          const sp = te > 3 ? Math.min(3, Math.max(0.5, t / te)) : 1;   // this boot's reading pace against last time's
+          left = Math.max(0, H.sat - te) * sp + postLast;
+          what = "Loading the game…";
+        } else {
+          left = Math.max(0, postLast - (t - tSat));
+          what = "Starting the game…";
+        }
+        // elapsed against elapsed plus what is left: the bar and the time left always agree
+        p = left > 0 ? t / (t + left) : 0.97 + 0.02 * (1 - Math.exp(-(t - tSat - postLast) / 5));
+      } else {
+        // first visit (or no timeline yet): downloads are most of it
+        const codeTot = cached ? 0 : (window.uewCodeTotal || 0), codeGot = cached ? 0 : (window.uewCodeGot || 0);
+        const need = codeTot + (F && F.planBytes ? F.planBytes() : 0), got = codeGot + (F ? F.fetched : 0);
+        const rate = t > 1 ? got / t : 0;
+        const d = need ? Math.min(1, got / need) : 0;
+        // after its last read the engine still works about as long again (0.9x the time to that point, measured)
+        // before the first frame; the bar gives that stage its share instead of waiting at the end
+        const POST = 0.9;
+        if (!tSat) {
+          const dl = !cached || got > (4 << 20);
+          const dlLeft = dl && rate > 0 && need ? Math.max(0, need - got) / rate : null;
+          // reads done at (now + downloads left), then the start-up work after them
+          const total = dlLeft == null ? null : (t + dlLeft) * (1 + POST);
+          p = total ? t / total : 0.5 * Math.max(d, f);
+          left = total ? total - t : null;
+          what = dl && need && d < 0.999 ? `Downloading ${(got / 1048576).toFixed(0)} / ${(need / 1048576).toFixed(0)} MB` : "Loading the game…";
+        } else {
+          const post = t - tSat, est = Math.max(3, POST * tSat), total = tSat + est;
+          p = post < est ? t / total : 0.97 + 0.02 * (1 - Math.exp(-(post - est) / 5));
+          left = Math.max(0, est - post);
+          what = "Starting the game…";
+        }
+      }
+      p = Math.min(0.99, Math.max(0, p));
+      shown = Math.max(shown, p);              // never goes backwards
       bar.value = shown * 100;
       pct.textContent = Math.floor(shown * 100) + "%";
-      if (code >= 1 && data > 0 && (M.uewPresents | 0) === 0) document.getElementById("status").textContent = data >= 0.99 ? "Starting the game…" : "Loading the game…";
-      requestAnimationFrame(tick);
+      stat.textContent = left == null ? what : `${what} (${secs(left)})`;
     };
-    requestAnimationFrame(tick);
+    // a timer, not animation frames: those stop while the page's thread is busy starting the game or the window is in
+    // the background, which froze the bar and the time left
+    const iv = setInterval(tick, 250);
+    tick();
   })();
 </script>
 <div id="fps"></div>
@@ -187,8 +264,8 @@
     uewPlayCacheMB: (window.uewProfile || {}).playCacheMB || 0,
     print: t => console.log(t),
     printErr: t => console.log(t),
-    setStatus: t => { if (t) status.textContent = t; },
-    onRuntimeInitialized: () => { status.textContent = ""; },
+    setStatus: () => {},   // the loading screen writes the status line itself
+    onRuntimeInitialized: () => {},   // the loading screen keeps its own status line
   };
   if (!parts.length) {
     // one game.wasm, handed straight from fetch() to the streaming compile: the browser can then keep the optimised
@@ -196,7 +273,7 @@
     // The code is shipped gzipped (a fifth of the size, for slow hosts) and decompressed as it streams into the
     // compiler; the decompressed module is kept in Cache Storage, and later launches compile from there, where the
     // browser also keeps the compiled machine code. A rebuild has a new code id, so it never runs stale code.
-    const CODE_ID = "66182fcf87d8", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
+    const CODE_ID = "37ff62590132", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
     const codeResponse = async () => {
       const wasmType = { headers: { "Content-Type": "application/wasm" } };
       const prefix = "uew-code:" + location.pathname + ":", url = new URL("__uew_code/" + CODE_ID + "/game.wasm", location.href).href;
@@ -225,11 +302,11 @@
         }
       });
       const r = { body: joined };
-      const total = 44733308;
+      const total = 44733372;
       let got = 0;
       const count = new TransformStream({ transform(ch, ctl) {
         got += ch.length;
-        status.textContent = `Downloading code ${(got / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB (only on the first visit)`;
+        window.uewCodeGot = got; window.uewCodeTotal = total;   // the loading screen shows these
         window.uewCodeProgress = Math.min(1, got / total);
         ctl.enqueue(ch);
       } });
@@ -254,7 +331,7 @@
       status.textContent = "Loading code…";
       const t0 = performance.now();
       WebAssembly.instantiateStreaming(codeResponse(), imports)
-        .then(r => { console.log(`[boot] code ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`); window.uewCodeProgress = 1; status.textContent = "Starting…"; done(r.instance, r.module); })
+        .then(r => { console.log(`[boot] code ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`); window.uewCodeProgress = 1; done(r.instance, r.module); })
         .catch(e => { status.textContent = "Failed to load: " + e.message; });
       return {};
     };
