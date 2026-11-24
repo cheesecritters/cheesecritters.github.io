@@ -189,14 +189,16 @@ var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIR
   // plan, read-ahead, background fill) keeps to a few connections, and to one while the game waits on a read, so a
   // slow host's bandwidth goes to what the game needs right now instead of to what it may need later.
   const HI = 1, LO = 0;
+  // at most 4 requests at once: an HTTP/1.1 host gets 6 connections per page, and the other 2 stay free for everything
+  // else (the code download, a reload, a navigation), which otherwise waited behind the file downloads
   const Q = F.q = {
     run: 0,
     runHi: 0,
     runLo: 0,
     hi: [],
     lo: [],
-    max: 6,
-    maxLo: 4
+    max: 4,
+    maxLo: 3
   };
   const drain = () => {
     while (Q.run < Q.max) {
@@ -633,7 +635,10 @@ var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIR
         console.log(`[files] memory cache trimmed to ${play >> 20} MB now that the game is running`);
       }, 1e3);
     }
-    const nofill = /[?&]nofill=1/.test(location.search) || (navigator.connection && navigator.connection.saveData);
+    // not on weak devices (Module.uewNoFill, set by the page's low and mid profiles): there the background downloads and
+    // decompression compete with the game for the one thread it runs on - at a Chromebook's speed the game dropped from
+    // ~12 to ~5 fps once it started, and the page eventually stopped responding. Blocks the game reads are stored anyway.
+    const nofill = /[?&]nofill=1/.test(location.search) || Module.uewNoFill || (navigator.connection && navigator.connection.saveData);
     if (!nofill) {
       const t2 = setInterval(() => {
         if ((Module.uewPresents | 0) >= 60) {
@@ -8450,8 +8455,10 @@ function _uewg_present(view, ringUsed) {
   if (g.prof) g.prof.frameEnd();
   // long frames: what happened in them (new shaders and pipelines, file downloads)
   const now = performance.now(), h = g.hitch, F = Module.uewFiles || {};
-  if (h.last && now - h.last > 100 && g.frames > 60 && h.logged < 300) {
+  // over 500 ms always, slower-than-100 ms frames at most every 2 s (on a slow device that's every frame)
+  if (h.last && now - h.last > 100 && g.frames > 60 && h.logged < 300 && (now - h.last > 500 || now - (h.said || 0) > 2e3)) {
     h.logged++;
+    h.said = now;
     console.log(`[hitch] ${(now - h.last).toFixed(0)} ms frame: ${h.sh + h.psh} new shaders, ${h.pipe + h.ppipe} new pipelines (this frame and the one before), ${h.rb} GPU readbacks, ` + `${(((F.fetched || 0) - h.bytes) / 1048576).toFixed(1)} MB in ${(F.requests || 0) - h.req} downloads (${((F.fetchMs || 0) - h.fms).toFixed(0)} ms waiting)`);
   }
   h.last = now;
@@ -8540,7 +8547,11 @@ function _uewg_present(view, ringUsed) {
     h.upBytes = 0;
     g.queue.onSubmittedWorkDone().then(() => {
       const ms = performance.now() - t0;
-      if (ms > 150 && (h.gpuLogged = (h.gpuLogged || 0) + 1) < 100) console.log(`[hitch] GPU took ${ms.toFixed(0)} ms for a frame: ${info}`);
+      const t = performance.now();
+      if (ms > 150 && (ms > 500 || t - (h.gpuSaid || 0) > 2e3) && (h.gpuLogged = (h.gpuLogged || 0) + 1) < 100) {
+        h.gpuSaid = t;
+        console.log(`[hitch] GPU took ${ms.toFixed(0)} ms for a frame: ${info}`);
+      }
     });
   }
   g.frames++;

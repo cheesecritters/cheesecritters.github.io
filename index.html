@@ -19,6 +19,44 @@
 </head>
 <body>
 <script>
+  // Crash log. A tab the browser kills (out of memory, a hung page, a GPU crash) takes its console with it, so the page
+  // keeps its last lines on the device: everything it logs, plus a heartbeat every few seconds (frames, memory). Open the
+  // page with ?lastlog=1 after a crash to read the previous session's log instead of starting the game.
+  (() => {
+    const KEY = "uewLastLog:" + location.pathname;
+    if (/[?&]lastlog=1/.test(location.search)) {
+      let t = "";
+      try { t = localStorage.getItem(KEY) || ""; } catch (e) {}
+      document.title = "Last session log";
+      document.body.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.style.cssText = "white-space:pre-wrap;font:12px monospace;color:#ddd;background:#000;margin:0;padding:8px";
+      pre.textContent = t || "No log saved on this device yet.";
+      document.body.appendChild(pre);
+      window.stop();
+      return;
+    }
+    const lines = [], t0 = performance.now();
+    const add = s => { lines.push(((performance.now() - t0) / 1000).toFixed(1) + " " + String(s).slice(0, 400)); if (lines.length > 1500) lines.splice(0, lines.length - 1500); };
+    for (const k of ["log", "warn", "error"]) {
+      const orig = console[k].bind(console);
+      console[k] = (...a) => { try { add((k == "log" ? "" : "[" + k + "] ") + a.map(x => typeof x == "string" ? x : (x && x.stack) || String(x)).join(" ")); } catch (e) {} orig(...a); };
+    }
+    addEventListener("error", e => add("[page error] " + e.message + " at " + e.filename + ":" + e.lineno));
+    addEventListener("unhandledrejection", e => add("[unhandled rejection] " + ((e.reason && e.reason.stack) || e.reason)));
+    const n = navigator;
+    add(`[device] ${n.userAgent} | ${n.hardwareConcurrency} cores, ${n.deviceMemory || "?"} GB, screen ${screen.width}x${screen.height} @${devicePixelRatio}`);
+    const save = () => { try { localStorage.setItem(KEY, lines.join("\n")); } catch (e) {} };
+    setInterval(() => {
+      const M = window.Module || {}, pm = performance.memory;
+      add(`[heartbeat] frames ${M.uewPresents | 0}, wasm memory ${M.HEAPU8 ? (M.HEAPU8.buffer.byteLength / 1048576).toFixed(0) : (typeof HEAPU8 != "undefined" ? (HEAPU8.buffer.byteLength / 1048576).toFixed(0) : "?")} MB` +
+          (pm ? `, JS heap ${(pm.usedJSHeapSize / 1048576).toFixed(0)} MB` : "") + (M.uewFiles ? `, file cache ${(M.uewFiles.cacheBytes / 1048576).toFixed(0)} MB` : ""));
+      save();
+    }, 3000);
+    addEventListener("pagehide", save);
+  })();
+</script>
+<script>
   // GAME FILES HOST: where the game's files (the game.wasm.* code parts and the data/ folder) are served from.
   // Empty means "next to this page", which is all a normal web server or static host needs: no headers, no CORS,
   // no Range support. Opened straight from disk (file://) a page may not read local files at all, so that case
@@ -59,7 +97,7 @@
     const P = window.uewProfile = [
       // (no forced texture pool size: one too small for the scene keeps the streamer loading and dropping mips, which
       // tripled the engine's start-up work)
-      { name: "low", w: 848, h: 480, guestMB: 1536, gpuMB: 768, cacheMB: 128, playCacheMB: 48,
+      { name: "low", w: 848, h: 480, guestMB: 1024, gpuMB: 512, cacheMB: 96, playCacheMB: 32,
         cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 1,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
               "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0," +
               // weak GPUs (Chromebooks): the 3D scene at 70% of the canvas, scaled up (UI stays sharp), one shadow
@@ -71,6 +109,9 @@
               "sg.AntiAliasingQuality 1,r.Shadow.MaxResolution 1024,r.ScreenPercentage 85" },
       { name: "high", w: 0, h: 0, guestMB: 2048, gpuMB: 1536, cacheMB: 512, playCacheMB: 128, cmds: "" },
     ][tier];
+    // 4 GB or less (most Chromebooks): the game peaks near 700 MB, so 1 GB of guest memory is enough, and every MB
+    // reserved past that is one the browser may kill the tab for
+    if ((navigator.deviceMemory || 8) <= 4) P.guestMB = Math.min(P.guestMB, 1024);
     // testing overrides: ?guestmb=N (guest memory), ?cmds=0 (none of the profile's engine settings)
     if (+qs.get("guestmb")) P.guestMB = +qs.get("guestmb");
     if (qs.get("cmds") === "0") P.cmds = "";
@@ -262,6 +303,8 @@
     // guest memory is reserved whole at start: the profile's size, not the build's (the game peaks well below it)
     uewGuestMB: (window.uewProfile || {}).guestMB || 0,
     uewPlayCacheMB: (window.uewProfile || {}).playCacheMB || 0,
+    // weak devices skip the background download of the rest of the game files (uew_files.js: it starved the game)
+    uewNoFill: (window.uewProfile || {}).name !== "high" && !/[?&]fill=1/.test(location.search),
     print: t => console.log(t),
     printErr: t => console.log(t),
     setStatus: () => {},   // the loading screen writes the status line itself
@@ -273,8 +316,8 @@
     // The code is shipped gzipped (a fifth of the size, for slow hosts) and decompressed as it streams into the
     // compiler; the decompressed module is kept in Cache Storage, and later launches compile from there, where the
     // browser also keeps the compiled machine code. A rebuild has a new code id, so it never runs stale code.
-    const CODE_ID = "93804e45424a", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
-    const codeResponse = async () => {
+    const CODE_ID = "ad9099601a88", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
+    const codeResponse = async (noStore) => {
       const wasmType = { headers: { "Content-Type": "application/wasm" } };
       const prefix = "uew-code:" + location.pathname + ":", url = new URL("__uew_code/" + CODE_ID + "/game.wasm", location.href).href;
       let c = null;
@@ -302,7 +345,7 @@
         }
       });
       const r = { body: joined };
-      const total = 43879351;
+      const total = 46811946;
       let got = 0;
       const count = new TransformStream({ transform(ch, ctl) {
         got += ch.length;
@@ -318,12 +361,18 @@
         async pull(ctl) { const { done, value } = await rd.read(); if (done) ctl.close(); else ctl.enqueue(value); },
       });
       if (gz) body = body.pipeThrough(new DecompressionStream("gzip"));
-      if (c) {
-        const [a, b] = body.tee();
-        body = a;
-        c.put(url, new Response(b, wasmType))
-          .then(() => caches.keys()).then(ks => ks.forEach(k => { if (k.startsWith(prefix) && k != prefix + CODE_ID) caches.delete(k); }))
-          .catch(() => {});
+      if (c && !noStore) {
+        // into this device's cache first (written to disk as it streams in), then compiled from there. Splitting the
+        // stream to do both at once (tee) held whatever one side was behind in memory - up to the whole 220 MB, more
+        // than once - and a 4 GB Chromebook's tab was killed for it. Compiling waits for the download this way, but it
+        // is mostly deferred to first use anyway.
+        try {
+          await c.put(url, new Response(body, wasmType));
+          caches.keys().then(ks => ks.forEach(k => { if (k.startsWith(prefix) && k != prefix + CODE_ID) caches.delete(k); })).catch(() => {});
+          const hit = await c.match(url);
+          if (hit) return hit;
+        } catch (e) {}
+        return codeResponse(true);   // the cache refused it (full, private mode): download again and compile directly
       }
       return new Response(body, wasmType);
     };
