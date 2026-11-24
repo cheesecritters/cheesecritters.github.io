@@ -128,6 +128,12 @@
       mid: { ResolutionQuality: 85, ViewDistanceQuality: 1, AntiAliasingQuality: 1, ShadowQuality: 1, PostProcessQuality: 1, TextureQuality: 1, EffectsQuality: 1, FoliageQuality: 1 },
     }[P.name];
     if (SG) P.gus = "[ScalabilityGroups]\n" + Object.entries(SG).map(([k, v]) => `sg.${k}=${v}\n`).join("");
+    // Mouse latency, every profile. Unreal smooths the mouse over the last frames (on by default): at a low frame rate
+    // that window is long and the view trails the hand. And the render thread normally runs a frame behind the game
+    // thread so the two overlap on separate cores; with every game thread on one browser thread nothing overlaps, so it
+    // was only a frame of extra delay.
+    P.input = "[/Script/Engine.InputSettings]\nbEnableMouseSmoothing=False\nbEnableFOVScaling=False\n";
+    P.engine = "[SystemSettings]\nr.OneFrameThreadLag=0\n";
     if (P.name === "low") P.scal = [
       "[ViewDistanceQuality@0]", "r.ViewDistanceScale=0.3", "r.SkeletalMeshLODBias=2", "r.StaticMeshLODDistanceScale=4", "r.ParticleLODBias=2",
       "[ShadowQuality@0]", "r.ShadowQuality=0", "r.Shadow.MaxResolution=128", "r.Shadow.CSM.MaxCascades=1", "r.LightFunctionQuality=0",
@@ -323,6 +329,8 @@
       for (const d of dirs) {
         if (P && P.gus) s[d + "/GameUserSettings.ini"] = (s[d + "/GameUserSettings.ini"] || "") + P.gus;
         if (P && P.scal) s[d + "/Scalability.ini"] = (s[d + "/Scalability.ini"] || "") + P.scal;
+        if (P && P.input) s[d + "/Input.ini"] = (s[d + "/Input.ini"] || "") + P.input;
+        if (P && P.engine) s[d + "/Engine.ini"] = (s[d + "/Engine.ini"] || "") + P.engine;
       }
       return s;
     })({"Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n"}, window.uewProfile),

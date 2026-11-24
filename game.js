@@ -6030,10 +6030,24 @@ var _host_lock_pointer = function(lock) {
     // the browser refuses a lock right after the user left one (Esc); the next click asks again
     c.addEventListener("click", () => {
       if (!Module.uewWantLock || document.pointerLockElement === c) return;
+      // raw movement (unadjustedMovement): skips the system's pointer acceleration and smoothing, which lags behind
+      // the hand (ChromeOS's especially). Browsers that refuse it get an ordinary lock.
+      const plain = () => {
+        try {
+          const q = c.requestPointerLock();
+          if (q && q.catch) q.catch(() => {});
+        } catch (e) {}
+      };
       try {
-        const p = c.requestPointerLock();
-        if (p && p.catch) p.catch(() => {});
-      } catch (e) {}
+        const p = c.requestPointerLock({
+          unadjustedMovement: true
+        });
+        if (p && p.catch) p.catch(e => {
+          if (!e || e.name !== "SecurityError") plain();
+        }); else if (!p) {}
+      } catch (e) {
+        plain();
+      }
     });
   }
 };
