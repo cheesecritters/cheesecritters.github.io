@@ -97,13 +97,18 @@
     const P = window.uewProfile = [
       // (no forced texture pool size: one too small for the scene keeps the streamer loading and dropping mips, which
       // tripled the engine's start-up work)
-      { name: "low", w: 848, h: 480, guestMB: 1024, gpuMB: 512, cacheMB: 96, playCacheMB: 32,
-        cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 1,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
-              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0," +
-              // weak GPUs (Chromebooks): the 3D scene at 70% of the canvas, scaled up (UI stays sharp), one shadow
-              // cascade, and the costly post effects off
-              "r.ScreenPercentage 70,r.Shadow.CSM.MaxCascades 1,r.AmbientOcclusionLevels 0,r.SSR.Quality 0,r.BloomQuality 0," +
-              "r.LightShaftQuality 0,r.DepthOfFieldQuality 0,r.MotionBlurQuality 0,r.LensFlareQuality 0,r.SceneColorFringeQuality 0" },
+      // Chromebooks and the like: speed over looks, all the way. The window is 960x540, the smallest the game accepts
+      // ("The current resolution is too low" below it), and the 3D is drawn at 40% of that (384x216) and scaled up,
+      // no shadows (lights do shine through walls), no post effects, lowest materials, the simplest models from close
+      // up, blurrier textures, a short view distance and no detail meshes or foliage
+      { name: "low", w: 960, h: 540, guestMB: 1024, gpuMB: 512, cacheMB: 96, playCacheMB: 32,
+        cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 0,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
+              "sg.AntiAliasingQuality 0,r.ShadowQuality 0,r.ScreenPercentage 40,r.MaxAnisotropy 0,r.MipMapLODBias 1," +
+              "r.ViewDistanceScale 0.3,r.StaticMeshLODDistanceScale 4,r.SkeletalMeshLODBias 2,r.ParticleLODBias 2,r.DetailMode 0," +
+              "r.MaterialQualityLevel 0,r.AmbientOcclusionLevels 0,r.SSR.Quality 0,r.BloomQuality 0,r.LightShaftQuality 0," +
+              "r.DepthOfFieldQuality 0,r.MotionBlurQuality 0,r.LensFlareQuality 0,r.SceneColorFringeQuality 0,r.Tonemapper.Quality 0," +
+              "r.PostProcessAAQuality 0,r.TranslucencyLightingVolumeDim 4,r.LightFunctionQuality 0,r.RefractionQuality 0," +
+              "r.SeparateTranslucency 0,r.CustomDepth 0,foliage.DensityScale 0,grass.DensityScale 0" },
       { name: "mid", w: 960, h: 540, guestMB: 1536, gpuMB: 1024, cacheMB: 192, playCacheMB: 96,
         cmds: "sg.ViewDistanceQuality 1,sg.ShadowQuality 1,sg.PostProcessQuality 1,sg.TextureQuality 1,sg.EffectsQuality 1," +
               "sg.AntiAliasingQuality 1,r.Shadow.MaxResolution 1024,r.ScreenPercentage 85" },
@@ -115,6 +120,26 @@
     // testing overrides: ?guestmb=N (guest memory), ?cmds=0 (none of the profile's engine settings)
     if (+qs.get("guestmb")) P.guestMB = +qs.get("guestmb");
     if (qs.get("cmds") === "0") P.cmds = "";
+    // The profile's quality, put in the game's settings files (Module.uewSeed below). -ExecCmds alone did nothing: the
+    // game applies its saved scalability levels at start, which set every cvar they own again (r.ScreenPercentage is
+    // sg.ResolutionQuality's). Level 0 is redefined for "low" so the engine's own apply turns everything down.
+    const SG = {
+      low: { ResolutionQuality: 40, ViewDistanceQuality: 0, AntiAliasingQuality: 0, ShadowQuality: 0, PostProcessQuality: 0, TextureQuality: 0, EffectsQuality: 0, FoliageQuality: 0 },
+      mid: { ResolutionQuality: 85, ViewDistanceQuality: 1, AntiAliasingQuality: 1, ShadowQuality: 1, PostProcessQuality: 1, TextureQuality: 1, EffectsQuality: 1, FoliageQuality: 1 },
+    }[P.name];
+    if (SG) P.gus = "[ScalabilityGroups]\n" + Object.entries(SG).map(([k, v]) => `sg.${k}=${v}\n`).join("");
+    if (P.name === "low") P.scal = [
+      "[ViewDistanceQuality@0]", "r.ViewDistanceScale=0.3", "r.SkeletalMeshLODBias=2", "r.StaticMeshLODDistanceScale=4", "r.ParticleLODBias=2",
+      "[ShadowQuality@0]", "r.ShadowQuality=0", "r.Shadow.MaxResolution=128", "r.Shadow.CSM.MaxCascades=1", "r.LightFunctionQuality=0",
+      "r.DistanceFieldShadowing=0", "r.DistanceFieldAO=0",
+      "[PostProcessQuality@0]", "r.AmbientOcclusionLevels=0", "r.SSR.Quality=0", "r.BloomQuality=0", "r.LightShaftQuality=0",
+      "r.DepthOfFieldQuality=0", "r.MotionBlurQuality=0", "r.LensFlareQuality=0", "r.SceneColorFringeQuality=0", "r.Tonemapper.Quality=0",
+      "r.SeparateTranslucency=0", "r.TranslucencyLightingVolumeDim=4", "r.RefractionQuality=0", "r.EyeAdaptationQuality=2",
+      "[TextureQuality@0]", "r.MipMapLODBias=1", "r.MaxAnisotropy=0", "r.Streaming.PoolSize=200",
+      "[EffectsQuality@0]", "r.MaterialQualityLevel=0", "r.DetailMode=0", "r.SSS.Scale=0", "r.TranslucencyVolumeBlur=0",
+      "[AntiAliasingQuality@0]", "r.PostProcessAAQuality=0",
+      "[FoliageQuality@0]", "foliage.DensityScale=0", "grass.DensityScale=0",
+    ].join("\n") + "\n";
     console.log(`[profile] ${P.name} (${gpuName || "gpu unknown"}, ${navigator.hardwareConcurrency || "?"} cores, ${navigator.deviceMemory || "?"} GB)${qq ? " by ?quality" : ""}`);
     const weak = tier < 2;
     let w = 0, h = 0;
@@ -290,7 +315,17 @@
     canvas: document.getElementById("canvas"),
     arguments: ["--image", "/image.bin", "--root", "/game", "--save", "/save/HelloNeighbour-Win64-Shipping", "--exe", "HelloNeighbour/Binaries/Win64/HelloNeighbour-Win64-Shipping.exe"].concat(window.uewResArgs || [], new URLSearchParams(location.search).getAll("arg")),
     uewSave: "/save/HelloNeighbour-Win64-Shipping",
-    uewSeed: {"Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n"},
+    // the build's settings files plus the device profile's (its scalability levels, and for "low" what level 0
+    // means): written into the game's own settings files, where Unreal's startup apply keeps them
+    uewSeed: ((s, P) => {
+      s = Object.assign({}, s);
+      const dirs = [...new Set(Object.keys(s).map(k => k.slice(0, k.lastIndexOf("/"))))];
+      for (const d of dirs) {
+        if (P && P.gus) s[d + "/GameUserSettings.ini"] = (s[d + "/GameUserSettings.ini"] || "") + P.gus;
+        if (P && P.scal) s[d + "/Scalability.ini"] = (s[d + "/Scalability.ini"] || "") + P.scal;
+      }
+      return s;
+    })({"Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/GameUserSettings.ini": "[ScalabilityGroups]\nsg.ShadowQuality=1\nsg.PostProcessQuality=1\nsg.EffectsQuality=1\nsg.FoliageQuality=1\nsg.ViewDistanceQuality=1\nsg.AntiAliasingQuality=1\nsg.ReflectionQuality=1\nsg.GlobalIlluminationQuality=1\nsg.ShadingQuality=1\nsg.LandscapeQuality=1\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/Windows/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n", "Users/Player/AppData/Local/HelloNeighbour/Saved/Config/WindowsNoEditor/Scalability.ini": "[PostProcessQuality@0]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n[PostProcessQuality@1]\nr.EyeAdaptationQuality=2\nr.Tonemapper.Quality=5\n"}, window.uewProfile),
     // the game files live in data/ under the host set above
     uewDataUrl: (GAME_BASE || "./"),
     uewAsyncShaders: true,
