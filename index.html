@@ -61,7 +61,7 @@
       // tripled the engine's start-up work)
       { name: "low", w: 848, h: 480, guestMB: 1536, gpuMB: 768, cacheMB: 128, playCacheMB: 48,
         cmds: "sg.ViewDistanceQuality 0,sg.ShadowQuality 1,sg.PostProcessQuality 0,sg.TextureQuality 0,sg.EffectsQuality 0," +
-              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0,t.MaxFPS 30," +
+              "sg.AntiAliasingQuality 0,r.Shadow.MaxResolution 512,r.MaxAnisotropy 0," +
               // weak GPUs (Chromebooks): the 3D scene at 70% of the canvas, scaled up (UI stays sharp), one shadow
               // cascade, and the costly post effects off
               "r.ScreenPercentage 70,r.Shadow.CSM.MaxCascades 1,r.AmbientOcclusionLevels 0,r.SSR.Quality 0,r.BloomQuality 0," +
@@ -273,7 +273,7 @@
     // The code is shipped gzipped (a fifth of the size, for slow hosts) and decompressed as it streams into the
     // compiler; the decompressed module is kept in Cache Storage, and later launches compile from there, where the
     // browser also keeps the compiled machine code. A rebuild has a new code id, so it never runs stale code.
-    const CODE_ID = "37ff62590132", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
+    const CODE_ID = "93804e45424a", CODE_GZ = true, CODE_PARTS = ["game.wasm.gz.0", "game.wasm.gz.1", "game.wasm.gz.2"];
     const codeResponse = async () => {
       const wasmType = { headers: { "Content-Type": "application/wasm" } };
       const prefix = "uew-code:" + location.pathname + ":", url = new URL("__uew_code/" + CODE_ID + "/game.wasm", location.href).href;
@@ -302,7 +302,7 @@
         }
       });
       const r = { body: joined };
-      const total = 44733372;
+      const total = 43879351;
       let got = 0;
       const count = new TransformStream({ transform(ch, ctl) {
         got += ch.length;
@@ -365,16 +365,6 @@
     };
   }
 </script>
-<script>
-  // real threads: start once the page is cross-origin isolated (headers from the host, or coi-sw.js)
-  if (self.crossOriginIsolated) document.write('<script src="game.js"><\/script>');
-  else if (navigator.serviceWorker && window.isSecureContext) {
-    status.textContent = "Setting up threads…";
-    navigator.serviceWorker.register("coi-sw.js").then(() => navigator.serviceWorker.ready).then(() => {
-      if (sessionStorage.getItem("uewCoi") === location.href) status.textContent = "This host blocks the isolation real threads need; rebuild with cooperative threads.";
-      else { sessionStorage.setItem("uewCoi", location.href); location.reload(); }
-    });
-  } else status.textContent = "Real threads need https (or localhost) to run.";
-</script>
+<script src="game.js"></script>
 </body>
 </html>
